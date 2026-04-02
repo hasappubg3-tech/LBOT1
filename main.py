@@ -16,8 +16,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
-AMEER_TOKEN = os.environ.get("AMEER_BOT_TOKEN")
-OWNER_CHAT_ID = 7305367169
+OWNER_CHAT_ID = int(os.environ.get("OWNER_CHAT_ID", "7305367169"))
 
 FIXED_REPLY = (
     "أهلا صديقنا 😊\n\n"
@@ -49,17 +48,22 @@ async def myid(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def to_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     global pending_target_chat_id
-    if update.effective_chat.id != OWNER_CHAT_ID:
+    sender_id = update.effective_chat.id
+
+    if sender_id != OWNER_CHAT_ID:
+        logger.warning(f"Unauthorized /to attempt from chat_id={sender_id} (OWNER_CHAT_ID={OWNER_CHAT_ID})")
         return
+
     if not context.args:
         await update.message.reply_text("⚠️ استخدم: /to CHATID")
         return
+
     try:
         target_id = int(context.args[0])
         pending_target_chat_id = target_id
         await update.message.reply_text(
             f"✅ تم تحديد المستخدم ({target_id}) كهدف\n\n"
-            "الآن حوّل له أي ملف أو رسالة من بوت الامير وسيوصله تلقائياً.\n\n"
+            "أرسل أو حوّل الآن أي ملف أو رسالة وسيوصلها البوت للمستخدم تلقائياً.\n\n"
             "إلغاء الهدف: /cancel"
         )
         logger.info(f"Pending target set to {target_id}")
@@ -88,18 +92,31 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     if chat_id == OWNER_CHAT_ID:
         if pending_target_chat_id is not None:
             target_id = pending_target_chat_id
+            pending_target_chat_id = None
             try:
                 await context.bot.copy_message(
                     chat_id=target_id,
                     from_chat_id=OWNER_CHAT_ID,
                     message_id=msg.message_id,
                 )
-                await msg.reply_text(f"✅ تم إرسال الملف للمستخدم ({target_id})")
-                logger.info(f"File sent to user {target_id} via pending target")
+                await msg.reply_text(f"✅ تم إرسال الرسالة للمستخدم ({target_id})")
+                logger.info(f"Message sent to user {target_id} via /to")
             except Exception as e:
-                await msg.reply_text(f"❌ فشل الإرسال للمستخدم ({target_id})")
-                logger.error(f"Failed to send file to {target_id}: {e}")
-            pending_target_chat_id = None
+                logger.error(f"copy_message failed for user {target_id}: {e}")
+                try:
+                    await context.bot.forward_message(
+                        chat_id=target_id,
+                        from_chat_id=OWNER_CHAT_ID,
+                        message_id=msg.message_id,
+                    )
+                    await msg.reply_text(f"✅ تم إرسال الرسالة للمستخدم ({target_id})")
+                    logger.info(f"Message forwarded to user {target_id} via fallback")
+                except Exception as e2:
+                    await msg.reply_text(
+                        f"❌ فشل الإرسال للمستخدم ({target_id})\n"
+                        f"السبب: {e2}"
+                    )
+                    logger.error(f"forward_message also failed for user {target_id}: {e2}")
             return
 
         if msg.reply_to_message:
@@ -115,7 +132,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                     await msg.reply_text("✅ تم إرسال الرد للمستخدم")
                     logger.info(f"Reply sent to user {target_chat_id}")
                 except Exception as e:
-                    await msg.reply_text("❌ فشل الإرسال للمستخدم")
+                    await msg.reply_text(f"❌ فشل الإرسال للمستخدم\nالسبب: {e}")
                     logger.error(f"Failed to send reply to {target_chat_id}: {e}")
         return
 
@@ -142,6 +159,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 def main() -> None:
     if not TOKEN:
         raise ValueError("TELEGRAM_BOT_TOKEN is not set")
+
+    logger.info(f"Bot starting. OWNER_CHAT_ID={OWNER_CHAT_ID}")
 
     app = Application.builder().token(TOKEN).build()
 
