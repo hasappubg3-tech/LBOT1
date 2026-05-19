@@ -152,6 +152,11 @@ async def setgroup_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     sender = update.effective_chat.id
 
     if not is_owner(sender):
+        await update.message.reply_text(
+            f"⛔️ ليس لديك صلاحية لهذا الأمر.\n"
+            f"معرّفك: `{sender}`",
+            parse_mode="Markdown",
+        )
         return
 
     chat = update.effective_chat
