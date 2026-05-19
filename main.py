@@ -1,8 +1,10 @@
 import os
 import json
 import logging
+import time
 from pathlib import Path
 from telegram import Update
+from telegram.error import Forbidden
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -71,6 +73,7 @@ def load_settings() -> dict:
                 data.setdefault("admins", [])
                 data.setdefault("user_topic_map", {})
                 data.setdefault("topic_user_map", {})
+                data.setdefault("last_notified", {})
                 return data
         except Exception as e:
             logger.error(f"Failed to load settings: {e}")
@@ -79,6 +82,7 @@ def load_settings() -> dict:
         "admins": [],
         "user_topic_map": {},
         "topic_user_map": {},
+        "last_notified": {},
     }
 
 
@@ -120,6 +124,18 @@ def get_topic_user_map() -> dict[int, int]:
 def save_topic_mapping(user_id: int, topic_id: int) -> None:
     settings["user_topic_map"][str(user_id)] = topic_id
     settings["topic_user_map"][str(topic_id)] = user_id
+    save_settings(settings)
+
+
+def should_notify_user(user_id: int) -> bool:
+    last = settings.get("last_notified", {}).get(str(user_id))
+    if last is None:
+        return True
+    return (time.time() - last) >= 86400
+
+
+def mark_user_notified(user_id: int) -> None:
+    settings.setdefault("last_notified", {})[str(user_id)] = time.time()
     save_settings(settings)
 
 
@@ -358,6 +374,7 @@ async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
             return
 
         await msg.reply_text(REQUEST_RECEIVED)
+        mark_user_notified(chat_id)
         return
 
     topic_id = user_topic_map[chat_id]
@@ -367,6 +384,11 @@ async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
         logger.info(f"Forwarded message from user {chat_id} to topic {topic_id}")
     except Exception as e:
         logger.error(f"Failed to forward message from user {chat_id} to topic {topic_id}: {e}")
+        return
+
+    if should_notify_user(chat_id):
+        await msg.reply_text(REQUEST_RECEIVED)
+        mark_user_notified(chat_id)
 
 
 async def handle_group_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -395,10 +417,25 @@ async def handle_group_message(update: Update, context: ContextTypes.DEFAULT_TYP
     try:
         await forward_or_copy(context, group_id, target_user_id, msg.message_id)
         logger.info(f"Sent reply from topic {topic_id} to user {target_user_id}")
+    except Forbidden as e:
+        logger.error(f"User {target_user_id} blocked the bot: {e}")
+        try:
+            await msg.reply_text(
+                f"⚠️ لم تصل الرسالة للمستخدم `{target_user_id}`\n\n"
+                f"السبب: المستخدم حظر البوت ولا يمكن إرسال الرسائل إليه.",
+                parse_mode="Markdown",
+            )
+        except Exception:
+            pass
     except Exception as e:
         logger.error(f"Failed to send reply to user {target_user_id}: {e}")
         try:
-            await msg.reply_text(f"❌ فشل الإرسال للمستخدم\nالسبب: {e}")
+            await msg.reply_text(
+                f"⚠️ لم تصل الرسالة للمستخدم `{target_user_id}`\n\n"
+                f"السبب: {e}\n\n"
+                f"يرجى التحقق من المشكلة أعلاه.",
+                parse_mode="Markdown",
+            )
         except Exception:
             pass
 
