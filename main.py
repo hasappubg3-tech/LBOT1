@@ -1,5 +1,7 @@
 import os
+import json
 import logging
+from pathlib import Path
 from telegram import Update
 from telegram.ext import (
     Application,
@@ -16,10 +18,9 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
-GROUP_CHAT_ID = int(os.environ.get("GROUP_CHAT_ID", "0"))
+OWNER_CHAT_ID = int(os.environ.get("OWNER_CHAT_ID", "0"))
 
-user_topic_map: dict[int, int] = {}
-topic_user_map: dict[int, int] = {}
+SETTINGS_FILE = Path("settings.json")
 
 WELCOME_MESSAGE = (
     "أهلا صديقنا 😊\n\n"
@@ -30,19 +31,229 @@ WELCOME_MESSAGE = (
 REQUEST_RECEIVED = "حسناً صديقنا…تم ارسال طلبك للمشرفين وسوف يتم الرد باسرع وقت 😇"
 
 
+def load_settings() -> dict:
+    if SETTINGS_FILE.exists():
+        try:
+            with open(SETTINGS_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                data.setdefault("group_chat_id", None)
+                data.setdefault("admins", [])
+                data.setdefault("user_topic_map", {})
+                data.setdefault("topic_user_map", {})
+                return data
+        except Exception as e:
+            logger.error(f"Failed to load settings: {e}")
+    return {
+        "group_chat_id": None,
+        "admins": [],
+        "user_topic_map": {},
+        "topic_user_map": {},
+    }
+
+
+def save_settings(data: dict) -> None:
+    try:
+        with open(SETTINGS_FILE, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        logger.error(f"Failed to save settings: {e}")
+
+
+settings = load_settings()
+
+
+def get_group_id() -> int | None:
+    return settings.get("group_chat_id")
+
+
+def get_admins() -> list[int]:
+    return settings.get("admins", [])
+
+
+def is_owner(chat_id: int) -> bool:
+    return chat_id == OWNER_CHAT_ID
+
+
+def is_admin(chat_id: int) -> bool:
+    return is_owner(chat_id) or chat_id in get_admins()
+
+
+def get_user_topic_map() -> dict[int, int]:
+    return {int(k): int(v) for k, v in settings.get("user_topic_map", {}).items()}
+
+
+def get_topic_user_map() -> dict[int, int]:
+    return {int(k): int(v) for k, v in settings.get("topic_user_map", {}).items()}
+
+
+def save_topic_mapping(user_id: int, topic_id: int) -> None:
+    settings["user_topic_map"][str(user_id)] = topic_id
+    settings["topic_user_map"][str(topic_id)] = user_id
+    save_settings(settings)
+
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(WELCOME_MESSAGE)
 
 
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await update.message.reply_text(
-        "📋 قائمة الأوامر:\n\n/start - بدء المحادثة\n/help - المساعدة\n/myid - معرفة رقمك"
-    )
+    sender = update.effective_chat.id
+    if is_owner(sender):
+        text = (
+            "📋 أوامر المالك:\n\n"
+            "/setgroup — سجّل المجموعة (أرسله داخل المجموعة)\n"
+            "/addadmin <id> — أضف مشرفاً\n"
+            "/removeadmin <id> — احذف مشرفاً\n"
+            "/admins — قائمة المشرفين\n"
+            "/settings — إعدادات البوت\n"
+            "/myid — معرفة رقمك\n"
+        )
+    elif is_admin(sender):
+        text = (
+            "📋 أوامر المشرف:\n\n"
+            "/admins — قائمة المشرفين\n"
+            "/settings — إعدادات البوت\n"
+            "/myid — معرفة رقمك\n"
+        )
+    else:
+        text = "📋 قائمة الأوامر:\n\n/start - بدء المحادثة\n/help - المساعدة\n/myid - معرفة رقمك"
+    await update.message.reply_text(text)
 
 
 async def myid(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     chat_id = update.effective_chat.id
     await update.message.reply_text(f"🆔 رقمك: `{chat_id}`", parse_mode="Markdown")
+
+
+async def setgroup_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    sender = update.effective_chat.id
+
+    if not is_owner(sender):
+        return
+
+    chat = update.effective_chat
+    if chat.type in ("group", "supergroup"):
+        group_id = chat.id
+        group_title = chat.title or "بدون اسم"
+        settings["group_chat_id"] = group_id
+        save_settings(settings)
+        await update.message.reply_text(
+            f"✅ تم تسجيل المجموعة بنجاح!\n"
+            f"الاسم: {group_title}\n"
+            f"المعرف: `{group_id}`",
+            parse_mode="Markdown",
+        )
+        logger.info(f"Group set to {group_id} ({group_title}) by owner")
+    elif context.args:
+        try:
+            group_id = int(context.args[0])
+            settings["group_chat_id"] = group_id
+            save_settings(settings)
+            await update.message.reply_text(
+                f"✅ تم تعيين المجموعة: `{group_id}`", parse_mode="Markdown"
+            )
+            logger.info(f"Group set to {group_id} by owner via argument")
+        except ValueError:
+            await update.message.reply_text("⚠️ الرقم غير صحيح. مثال: /setgroup -1001234567890")
+    else:
+        await update.message.reply_text(
+            "ℹ️ لتسجيل المجموعة:\n"
+            "1️⃣ أضفني كمشرف في مجموعتك\n"
+            "2️⃣ أرسل /setgroup داخل المجموعة\n\n"
+            "أو أرسل: /setgroup <معرف المجموعة>"
+        )
+
+
+async def addadmin_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    sender = update.effective_chat.id
+    if not is_owner(sender):
+        return
+
+    if not context.args:
+        await update.message.reply_text("⚠️ استخدم: /addadmin <رقم_المستخدم>")
+        return
+
+    try:
+        new_admin = int(context.args[0])
+    except ValueError:
+        await update.message.reply_text("⚠️ الرقم غير صحيح")
+        return
+
+    if new_admin == OWNER_CHAT_ID:
+        await update.message.reply_text("ℹ️ أنت المالك بالفعل")
+        return
+
+    admins = get_admins()
+    if new_admin in admins:
+        await update.message.reply_text(f"ℹ️ المستخدم `{new_admin}` مشرف بالفعل", parse_mode="Markdown")
+        return
+
+    admins.append(new_admin)
+    settings["admins"] = admins
+    save_settings(settings)
+    await update.message.reply_text(f"✅ تمت إضافة المشرف: `{new_admin}`", parse_mode="Markdown")
+    logger.info(f"Admin {new_admin} added by owner")
+
+
+async def removeadmin_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    sender = update.effective_chat.id
+    if not is_owner(sender):
+        return
+
+    if not context.args:
+        await update.message.reply_text("⚠️ استخدم: /removeadmin <رقم_المستخدم>")
+        return
+
+    try:
+        target = int(context.args[0])
+    except ValueError:
+        await update.message.reply_text("⚠️ الرقم غير صحيح")
+        return
+
+    admins = get_admins()
+    if target not in admins:
+        await update.message.reply_text(f"ℹ️ المستخدم `{target}` ليس مشرفاً", parse_mode="Markdown")
+        return
+
+    admins.remove(target)
+    settings["admins"] = admins
+    save_settings(settings)
+    await update.message.reply_text(f"✅ تمت إزالة المشرف: `{target}`", parse_mode="Markdown")
+    logger.info(f"Admin {target} removed by owner")
+
+
+async def admins_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    sender = update.effective_chat.id
+    if not is_admin(sender):
+        return
+
+    admins = get_admins()
+    if not admins:
+        text = f"👑 المالك: `{OWNER_CHAT_ID}`\n\n📋 لا يوجد مشرفون مضافون حالياً"
+    else:
+        admin_list = "\n".join(f"• `{a}`" for a in admins)
+        text = f"👑 المالك: `{OWNER_CHAT_ID}`\n\n📋 المشرفون:\n{admin_list}"
+    await update.message.reply_text(text, parse_mode="Markdown")
+
+
+async def settings_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    sender = update.effective_chat.id
+    if not is_admin(sender):
+        return
+
+    group_id = get_group_id()
+    user_count = len(settings.get("user_topic_map", {}))
+    admins_count = len(get_admins())
+
+    group_text = f"`{group_id}`" if group_id else "❌ غير مضبوطة"
+    text = (
+        "⚙️ إعدادات البوت:\n\n"
+        f"📦 المجموعة: {group_text}\n"
+        f"👥 عدد المستخدمين: {user_count}\n"
+        f"🛡 عدد المشرفين: {admins_count}\n"
+        f"👑 المالك: `{OWNER_CHAT_ID}`"
+    )
+    await update.message.reply_text(text, parse_mode="Markdown")
 
 
 async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -52,10 +263,17 @@ async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     user = update.effective_user
     chat_id = update.effective_chat.id
+    group_id = get_group_id()
 
-    if GROUP_CHAT_ID == 0:
-        logger.error("GROUP_CHAT_ID is not set!")
+    if not group_id:
+        if is_owner(chat_id):
+            await msg.reply_text(
+                "⚠️ لم تُضبط المجموعة بعد.\n"
+                "أضفني كمشرف في مجموعتك ثم أرسل /setgroup داخلها."
+            )
         return
+
+    user_topic_map = get_user_topic_map()
 
     if chat_id not in user_topic_map:
         user_name = user.full_name if user else "مجهول"
@@ -64,15 +282,14 @@ async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
 
         try:
             topic = await context.bot.create_forum_topic(
-                chat_id=GROUP_CHAT_ID,
+                chat_id=group_id,
                 name=topic_name,
             )
             topic_id = topic.message_thread_id
-            user_topic_map[chat_id] = topic_id
-            topic_user_map[topic_id] = chat_id
+            save_topic_mapping(chat_id, topic_id)
 
             await context.bot.send_message(
-                chat_id=GROUP_CHAT_ID,
+                chat_id=group_id,
                 message_thread_id=topic_id,
                 text=(
                     f"👤 مستخدم جديد\n"
@@ -88,11 +305,12 @@ async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
 
         await msg.reply_text(REQUEST_RECEIVED)
 
+    user_topic_map = get_user_topic_map()
     topic_id = user_topic_map[chat_id]
 
     try:
         await context.bot.copy_message(
-            chat_id=GROUP_CHAT_ID,
+            chat_id=group_id,
             message_thread_id=topic_id,
             from_chat_id=chat_id,
             message_id=msg.message_id,
@@ -107,6 +325,10 @@ async def handle_group_message(update: Update, context: ContextTypes.DEFAULT_TYP
     if not msg:
         return
 
+    group_id = get_group_id()
+    if not group_id or update.effective_chat.id != group_id:
+        return
+
     if not msg.message_thread_id:
         return
 
@@ -114,9 +336,9 @@ async def handle_group_message(update: Update, context: ContextTypes.DEFAULT_TYP
         return
 
     topic_id = msg.message_thread_id
+    topic_user_map = get_topic_user_map()
 
     if topic_id not in topic_user_map:
-        logger.warning(f"No user mapped to topic {topic_id}, ignoring.")
         return
 
     target_user_id = topic_user_map[topic_id]
@@ -124,7 +346,7 @@ async def handle_group_message(update: Update, context: ContextTypes.DEFAULT_TYP
     try:
         await context.bot.copy_message(
             chat_id=target_user_id,
-            from_chat_id=GROUP_CHAT_ID,
+            from_chat_id=group_id,
             message_id=msg.message_id,
         )
         logger.info(f"Sent reply from topic {topic_id} to user {target_user_id}")
@@ -139,28 +361,39 @@ async def handle_group_message(update: Update, context: ContextTypes.DEFAULT_TYP
 def main() -> None:
     if not TOKEN:
         raise ValueError("TELEGRAM_BOT_TOKEN is not set")
-    if GROUP_CHAT_ID == 0:
-        raise ValueError("GROUP_CHAT_ID is not set — please set it in environment variables")
+    if OWNER_CHAT_ID == 0:
+        raise ValueError("OWNER_CHAT_ID is not set")
 
-    logger.info(f"Bot starting. GROUP_CHAT_ID={GROUP_CHAT_ID}")
+    logger.info(f"Bot starting. OWNER_CHAT_ID={OWNER_CHAT_ID}")
+
+    group_id = get_group_id()
+    if group_id:
+        logger.info(f"Group configured: {group_id}")
+    else:
+        logger.warning("No group configured yet. Owner must run /setgroup inside the target group.")
 
     app = Application.builder().token(TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_cmd))
     app.add_handler(CommandHandler("myid", myid))
+    app.add_handler(CommandHandler("setgroup", setgroup_cmd))
+    app.add_handler(CommandHandler("addadmin", addadmin_cmd))
+    app.add_handler(CommandHandler("removeadmin", removeadmin_cmd))
+    app.add_handler(CommandHandler("admins", admins_cmd))
+    app.add_handler(CommandHandler("settings", settings_cmd))
 
     app.add_handler(
         MessageHandler(
-            filters.ChatType.PRIVATE & ~filters.COMMAND,
-            handle_user_message,
+            filters.ChatType.GROUPS & ~filters.COMMAND,
+            handle_group_message,
         )
     )
 
     app.add_handler(
         MessageHandler(
-            filters.Chat(GROUP_CHAT_ID) & ~filters.COMMAND,
-            handle_group_message,
+            filters.ChatType.PRIVATE & ~filters.COMMAND,
+            handle_user_message,
         )
     )
 
