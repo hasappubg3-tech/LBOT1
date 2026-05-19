@@ -1,6 +1,10 @@
 {
   "group_chat_id": -1003939822013,
   "admins": [],
-  "user_topic_map": {},
-  "topic_user_map": {}
+  "user_topic_map": {
+    "8254064930": 26
+  },
+  "topic_user_map": {
+    "26": 8254064930
+  }
 }

@@ -291,6 +291,23 @@ async def handle_arabic_commands(update: Update, context: ContextTypes.DEFAULT_T
     )
 
 
+async def forward_or_copy(context, from_chat_id, to_chat_id, message_id, thread_id=None):
+    try:
+        await context.bot.forward_message(
+            chat_id=to_chat_id,
+            from_chat_id=from_chat_id,
+            message_id=message_id,
+            message_thread_id=thread_id,
+        )
+    except Exception:
+        await context.bot.copy_message(
+            chat_id=to_chat_id,
+            from_chat_id=from_chat_id,
+            message_id=message_id,
+            message_thread_id=thread_id,
+        )
+
+
 async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     msg = update.message
     if not msg:
@@ -313,7 +330,7 @@ async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
     if chat_id not in user_topic_map:
         user_name = user.full_name if user else "مجهول"
         username_part = f" (@{user.username})" if user and user.username else ""
-        topic_name = f"{user_name}{username_part}"
+        topic_name = user_name
 
         try:
             topic = await context.bot.create_forum_topic(
@@ -333,24 +350,21 @@ async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
                 ),
                 parse_mode="Markdown",
             )
-            logger.info(f"Created topic {topic_id} for user {chat_id} ({topic_name})")
+
+            await forward_or_copy(context, chat_id, group_id, msg.message_id, thread_id=topic_id)
+            logger.info(f"Created topic {topic_id} and forwarded first message for user {chat_id}")
         except Exception as e:
             logger.error(f"Failed to create topic for user {chat_id}: {e}")
             return
 
         await msg.reply_text(REQUEST_RECEIVED)
+        return
 
-    user_topic_map = get_user_topic_map()
     topic_id = user_topic_map[chat_id]
 
     try:
-        await context.bot.copy_message(
-            chat_id=group_id,
-            message_thread_id=topic_id,
-            from_chat_id=chat_id,
-            message_id=msg.message_id,
-        )
-        logger.info(f"Copied message from user {chat_id} to topic {topic_id}")
+        await forward_or_copy(context, chat_id, group_id, msg.message_id, thread_id=topic_id)
+        logger.info(f"Forwarded message from user {chat_id} to topic {topic_id}")
     except Exception as e:
         logger.error(f"Failed to forward message from user {chat_id} to topic {topic_id}: {e}")
 
@@ -379,11 +393,7 @@ async def handle_group_message(update: Update, context: ContextTypes.DEFAULT_TYP
     target_user_id = topic_user_map[topic_id]
 
     try:
-        await context.bot.copy_message(
-            chat_id=target_user_id,
-            from_chat_id=group_id,
-            message_id=msg.message_id,
-        )
+        await forward_or_copy(context, group_id, target_user_id, msg.message_id)
         logger.info(f"Sent reply from topic {topic_id} to user {target_user_id}")
     except Exception as e:
         logger.error(f"Failed to send reply to user {target_user_id}: {e}")
