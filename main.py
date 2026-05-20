@@ -668,7 +668,11 @@ async def handle_group_message(update: Update, context: ContextTypes.DEFAULT_TYP
     target_user_id = topic_user_map[topic_id]
 
     try:
-        await forward_or_copy(context, group_id, target_user_id, msg.message_id)
+        await context.bot.copy_message(
+            chat_id=target_user_id,
+            from_chat_id=group_id,
+            message_id=msg.message_id,
+        )
         logger.info(f"Sent reply from topic {topic_id} to user {target_user_id}")
         mark_user_notified(target_user_id)
         if is_confirm_delivery_enabled():
