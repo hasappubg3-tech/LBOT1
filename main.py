@@ -70,6 +70,8 @@ owner_state: dict[int, str] = {}
 _topic_locks: dict[int, asyncio.Lock] = {}
 _group_admin_cache: dict[int, tuple[bool, float]] = {}
 _GROUP_ADMIN_CACHE_TTL = 300
+# group_msg_id → (user_id, user_msg_id)  — in-memory only, resets on restart
+_msg_id_map: dict[int, tuple[int, int]] = {}
 
 
 def get_topic_lock(user_id: int) -> asyncio.Lock:
@@ -870,12 +872,13 @@ async def handle_group_message(update: Update, context: ContextTypes.DEFAULT_TYP
         return
 
     try:
-        await context.bot.copy_message(
+        sent = await context.bot.copy_message(
             chat_id=target_user_id,
             from_chat_id=group_id,
             message_id=msg.message_id,
         )
-        logger.info(f"Sent reply from topic {topic_id} to user {target_user_id}")
+        _msg_id_map[msg.message_id] = (target_user_id, sent.message_id)
+        logger.info(f"Sent reply from topic {topic_id} to user {target_user_id} (user_msg={sent.message_id})")
         mark_user_notified(target_user_id)
         if is_confirm_delivery_enabled():
             try:
@@ -903,6 +906,52 @@ async def handle_group_message(update: Update, context: ContextTypes.DEFAULT_TYP
             )
         except Exception:
             pass
+
+
+# ── Group edited-message handler ──────────────────────────────────────────────
+
+async def handle_group_edit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    msg = update.edited_message
+    if not msg:
+        return
+
+    group_id = get_group_id()
+    if not group_id or update.effective_chat.id != group_id:
+        return
+
+    if not msg.message_thread_id:
+        return
+
+    if not msg.from_user or msg.from_user.is_bot:
+        return
+
+    if not await is_group_admin(context, msg.from_user.id):
+        return
+
+    entry = _msg_id_map.get(msg.message_id)
+    if not entry:
+        return
+
+    user_id, user_msg_id = entry
+
+    try:
+        if msg.text:
+            await context.bot.edit_message_text(
+                chat_id=user_id,
+                message_id=user_msg_id,
+                text=msg.text,
+                entities=msg.entities or None,
+            )
+        elif msg.caption is not None:
+            await context.bot.edit_message_caption(
+                chat_id=user_id,
+                message_id=user_msg_id,
+                caption=msg.caption,
+                caption_entities=msg.caption_entities or None,
+            )
+        logger.info(f"Edited user message {user_msg_id} for user {user_id}")
+    except Exception as e:
+        logger.warning(f"Failed to edit message for user {user_id}: {e}")
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────
@@ -947,6 +996,11 @@ def main() -> None:
     app.add_handler(MessageHandler(
         filters.ChatType.GROUPS & ~filters.COMMAND,
         handle_group_message,
+    ))
+
+    app.add_handler(MessageHandler(
+        filters.ChatType.GROUPS & filters.UpdateType.EDITED_MESSAGE,
+        handle_group_edit,
     ))
 
     app.add_handler(MessageHandler(
