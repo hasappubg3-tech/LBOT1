@@ -44,6 +44,7 @@ COMMANDS_ADMIN = (
     "📋 *أوامر المشرف:*\n\n"
     "▪️ /admins — قائمة المشرفين\n"
     "▪️ /banned — قائمة المحظورين\n"
+    "▪️ /ban <id أو @يوزر> — حظر مستخدم مباشرةً\n"
     "▪️ /settings — إعدادات البوت\n"
     "▪️ /myid — معرفة رقمك\n"
     "▪️ الاوامر — عرض هذه القائمة"
@@ -56,7 +57,8 @@ COMMANDS_OWNER = (
     "▪️ /settings — لوحة الإعدادات التفاعلية\n"
     "▪️ /admins — قائمة المشرفين\n\n"
     "🚫 *الحظر:*\n"
-    "▪️ /banned — قائمة المحظورين\n\n"
+    "▪️ /banned — قائمة المحظورين\n"
+    "▪️ /ban <id أو @يوزر> — حظر مستخدم مباشرةً\n\n"
     "⚙️ *عام:*\n"
     "▪️ /myid — معرفة رقمك\n"
     "▪️ الاوامر — عرض هذه القائمة"
@@ -419,6 +421,43 @@ async def admins_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         admin_list = "\n".join(f"• {get_admin_display(a)}" for a in admins)
         text = f"👑 المالك: `{OWNER_CHAT_ID}`\n\n📋 المشرفون:\n{admin_list}"
     await update.message.reply_text(text, parse_mode="Markdown")
+
+async def ban_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    sender = update.effective_user.id if update.effective_user else None
+    if not sender or not await is_effective_admin(context, sender):
+        return
+    msg = update.message
+    args = context.args
+    if not args:
+        await msg.reply_text(
+            "⚠️ الاستخدام: `/ban <رقم_المستخدم>` أو `/ban @يوزر`",
+            parse_mode="Markdown",
+        )
+        return
+    target = args[0].strip()
+    target_id: int | None = None
+    if target.startswith("@"):
+        username = target[1:].lower()
+        target_id = resolve_username(username)
+        if target_id is None:
+            await msg.reply_text(f"⚠️ @{username} لم يراسل البوت من قبل، لا يمكن إيجاد رقمه.")
+            return
+    else:
+        try:
+            target_id = int(target)
+        except ValueError:
+            await msg.reply_text("⚠️ أرسل رقماً صحيحاً أو @يوزر.")
+            return
+    if is_banned(target_id):
+        await msg.reply_text(f"⚠️ المستخدم {get_ban_display(target_id)} محظور مسبقاً.", parse_mode="Markdown")
+        return
+    ban_user(target_id)
+    logger.info(f"Admin {sender} banned user {target_id} via /ban command")
+    await msg.reply_text(
+        f"✅ تم حظر المستخدم {get_ban_display(target_id)} من خدمات البوت.",
+        parse_mode="Markdown",
+    )
+
 
 async def banned_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     sender = update.effective_user.id if update.effective_user else None
@@ -796,6 +835,7 @@ async def handle_group_message(update: Update, context: ContextTypes.DEFAULT_TYP
             await msg.reply_text(f"⚠️ المستخدم `{target_user_id}` محظور مسبقاً.", parse_mode="Markdown")
         else:
             ban_user(target_user_id)
+            logger.info(f"Admin {msg.from_user.id} banned user {target_user_id} via group topic trigger")
             await msg.reply_text(
                 f"✅ تم حظر المستخدم {get_ban_display(target_user_id)} من خدمات البوت.",
                 parse_mode="Markdown",
@@ -861,6 +901,7 @@ def main() -> None:
     app.add_handler(CommandHandler("cancel", cancel_cmd))
     app.add_handler(CommandHandler("setgroup", setgroup_cmd))
     app.add_handler(CommandHandler("admins", admins_cmd))
+    app.add_handler(CommandHandler("ban", ban_cmd))
     app.add_handler(CommandHandler("banned", banned_cmd))
     app.add_handler(CommandHandler("settings", settings_cmd))
 
