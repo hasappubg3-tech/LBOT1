@@ -858,7 +858,9 @@ async def handle_group_message(update: Update, context: ContextTypes.DEFAULT_TYP
 
     target_user_id = topic_user_map[topic_id]
 
-    ban_trigger = (msg.text or "").strip() in ("حضر", "حظر")
+    msg_text = (msg.text or "").strip()
+
+    ban_trigger = msg_text in ("حضر", "حظر")
     if ban_trigger:
         if is_banned(target_user_id):
             await msg.reply_text(f"⚠️ المستخدم `{target_user_id}` محظور مسبقاً.", parse_mode="Markdown")
@@ -869,6 +871,25 @@ async def handle_group_message(update: Update, context: ContextTypes.DEFAULT_TYP
                 f"✅ تم حظر المستخدم {get_ban_display(target_user_id)} من خدمات البوت.",
                 parse_mode="Markdown",
             )
+        return
+
+    if msg_text == "حذف" and msg.reply_to_message:
+        replied_id = msg.reply_to_message.message_id
+        entry = _msg_id_map.get(replied_id)
+        if not entry:
+            await msg.reply_text("⚠️ لا يوجد ربط لهذه الرسالة (ربما أُرسلت قبل آخر تشغيل للبوت).")
+            return
+        user_id, user_msg_id = entry
+        try:
+            await context.bot.delete_message(chat_id=user_id, message_id=user_msg_id)
+            logger.info(f"Admin {msg.from_user.id} deleted message {user_msg_id} for user {user_id}")
+            try:
+                await msg.delete()
+            except Exception:
+                pass
+        except Exception as e:
+            logger.warning(f"Failed to delete message {user_msg_id} for user {user_id}: {e}")
+            await msg.reply_text(f"⚠️ تعذّر حذف الرسالة: {e}")
         return
 
     try:
