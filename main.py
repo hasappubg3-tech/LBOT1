@@ -99,6 +99,27 @@ async def is_effective_admin(context, user_id: int) -> bool:
     return is_admin(user_id) or await is_group_admin(context, user_id)
 
 
+_group_kicked_cache: dict[int, tuple[bool, float]] = {}
+_GROUP_KICKED_CACHE_TTL = 300
+
+
+async def is_kicked_from_group(context, user_id: int) -> bool:
+    group_id = get_group_id()
+    if not group_id:
+        return False
+    now = time.time()
+    cached = _group_kicked_cache.get(user_id)
+    if cached and (now - cached[1]) < _GROUP_KICKED_CACHE_TTL:
+        return cached[0]
+    try:
+        member = await context.bot.get_chat_member(group_id, user_id)
+        result = member.status == "kicked"
+    except Exception:
+        result = False
+    _group_kicked_cache[user_id] = (result, now)
+    return result
+
+
 # ── Settings load/save ────────────────────────────────────────────────────────
 
 def load_settings() -> dict:
@@ -705,9 +726,15 @@ async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
         track_username(user.id, user.username)
         check_pending_admin(user.id, user.username)
 
-    if user and is_banned(user.id):
-        await msg.reply_text("⛔️ لا يمكن إيصال طلبك، تم حظرك من جميع خدمات البوت.")
-        return
+    if user:
+        if is_banned(user.id):
+            await msg.reply_text("⛔️ لا يمكن إيصال طلبك، تم حظرك من جميع خدمات البوت.")
+            return
+        if not is_banned(user.id) and await is_kicked_from_group(context, user.id):
+            ban_user(user.id)
+            logger.info(f"Auto-banned user {user.id}: kicked from group")
+            await msg.reply_text("⛔️ لا يمكن إيصال طلبك، تم حظرك من جميع خدمات البوت.")
+            return
 
     if not group_id:
         return
