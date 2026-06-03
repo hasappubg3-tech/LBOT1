@@ -43,6 +43,7 @@ COMMANDS_USER = (
 COMMANDS_ADMIN = (
     "📋 *أوامر المشرف:*\n\n"
     "▪️ /admins — قائمة المشرفين\n"
+    "▪️ /banned — قائمة المحظورين\n"
     "▪️ /settings — إعدادات البوت\n"
     "▪️ /myid — معرفة رقمك\n"
     "▪️ الاوامر — عرض هذه القائمة"
@@ -54,6 +55,8 @@ COMMANDS_OWNER = (
     "👥 *إدارة المشرفين:*\n"
     "▪️ /settings — لوحة الإعدادات التفاعلية\n"
     "▪️ /admins — قائمة المشرفين\n\n"
+    "🚫 *الحظر:*\n"
+    "▪️ /banned — قائمة المحظورين\n\n"
     "⚙️ *عام:*\n"
     "▪️ /myid — معرفة رقمك\n"
     "▪️ الاوامر — عرض هذه القائمة"
@@ -112,6 +115,7 @@ def load_settings() -> dict:
                 data.setdefault("notification_cooldown", 7200)
                 data.setdefault("username_to_id", {})
                 data.setdefault("pending_admin_usernames", [])
+                data.setdefault("banned_users", [])
                 return data
         except Exception as e:
             logger.error(f"Failed to load settings: {e}")
@@ -127,6 +131,7 @@ def load_settings() -> dict:
         "notification_cooldown": 7200,
         "username_to_id": {},
         "pending_admin_usernames": [],
+        "banned_users": [],
     }
 
 
@@ -172,6 +177,49 @@ def get_notification_cooldown() -> int:
 
 def is_confirm_delivery_enabled() -> bool:
     return settings.get("confirm_delivery", True)
+
+def get_banned_users() -> list[int]:
+    return [int(x) for x in settings.get("banned_users", [])]
+
+def is_banned(user_id: int) -> bool:
+    return user_id in get_banned_users()
+
+def ban_user(user_id: int) -> None:
+    banned = get_banned_users()
+    if user_id not in banned:
+        banned.append(user_id)
+        settings["banned_users"] = banned
+        save_settings(settings)
+
+def unban_user_id(user_id: int) -> None:
+    banned = get_banned_users()
+    if user_id in banned:
+        banned.remove(user_id)
+        settings["banned_users"] = banned
+        save_settings(settings)
+
+def get_ban_display(user_id: int) -> str:
+    uid_str = str(user_id)
+    for uname, uid in settings.get("username_to_id", {}).items():
+        if str(uid) == uid_str:
+            return f"@{uname} (`{user_id}`)"
+    return f"`{user_id}`"
+
+def build_banned_text() -> str:
+    banned = get_banned_users()
+    if not banned:
+        return "🚫 *قائمة المحظورين*\n\nلا يوجد محظورون حالياً."
+    lines = "\n".join(f"• {get_ban_display(uid)}" for uid in banned)
+    return f"🚫 *قائمة المحظورين* ({len(banned)}):\n\n{lines}"
+
+def build_banned_keyboard() -> InlineKeyboardMarkup:
+    banned = get_banned_users()
+    buttons = []
+    for uid in banned:
+        display = get_ban_display(uid).replace("`", "")
+        buttons.append([InlineKeyboardButton(f"🔓 رفع الحظر عن {display}", callback_data=f"unban_{uid}")])
+    buttons.append([InlineKeyboardButton("🔄 تحديث", callback_data="banned_panel")])
+    return InlineKeyboardMarkup(buttons)
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -372,6 +420,17 @@ async def admins_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         text = f"👑 المالك: `{OWNER_CHAT_ID}`\n\n📋 المشرفون:\n{admin_list}"
     await update.message.reply_text(text, parse_mode="Markdown")
 
+async def banned_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    sender = update.effective_user.id if update.effective_user else None
+    if not sender or not await is_effective_admin(context, sender):
+        return
+    await update.message.reply_text(
+        build_banned_text(),
+        parse_mode="Markdown",
+        reply_markup=build_banned_keyboard(),
+    )
+
+
 async def settings_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     sender = update.effective_user.id if update.effective_user else None
     if not sender or not await is_effective_admin(context, sender):
@@ -399,9 +458,33 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     query = update.callback_query
     await query.answer()
     sender = update.effective_user.id
+    data = query.data
+
+    # ── Banned panel — متاح لكل المشرفين الفعليين ──
+    if data == "banned_panel" or data.startswith("unban_"):
+        if not await is_effective_admin(context, sender):
+            return
+        if data == "banned_panel":
+            await query.edit_message_text(
+                build_banned_text(),
+                parse_mode="Markdown",
+                reply_markup=build_banned_keyboard(),
+            )
+        elif data.startswith("unban_"):
+            try:
+                target_id = int(data[6:])
+            except ValueError:
+                return
+            unban_user_id(target_id)
+            await query.edit_message_text(
+                build_banned_text(),
+                parse_mode="Markdown",
+                reply_markup=build_banned_keyboard(),
+            )
+        return
+
     if not is_owner(sender):
         return
-    data = query.data
 
     if data == "settings_main":
         await query.edit_message_text(
@@ -583,6 +666,10 @@ async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
         track_username(user.id, user.username)
         check_pending_admin(user.id, user.username)
 
+    if user and is_banned(user.id):
+        await msg.reply_text("⛔️ لا يمكن إيصال طلبك، تم حظرك من جميع خدمات البوت.")
+        return
+
     if not group_id:
         return
 
@@ -703,6 +790,18 @@ async def handle_group_message(update: Update, context: ContextTypes.DEFAULT_TYP
 
     target_user_id = topic_user_map[topic_id]
 
+    ban_trigger = (msg.text or "").strip() in ("حضر", "حظر")
+    if ban_trigger:
+        if is_banned(target_user_id):
+            await msg.reply_text(f"⚠️ المستخدم `{target_user_id}` محظور مسبقاً.", parse_mode="Markdown")
+        else:
+            ban_user(target_user_id)
+            await msg.reply_text(
+                f"✅ تم حظر المستخدم {get_ban_display(target_user_id)} من خدمات البوت.",
+                parse_mode="Markdown",
+            )
+        return
+
     try:
         await context.bot.copy_message(
             chat_id=target_user_id,
@@ -762,6 +861,7 @@ def main() -> None:
     app.add_handler(CommandHandler("cancel", cancel_cmd))
     app.add_handler(CommandHandler("setgroup", setgroup_cmd))
     app.add_handler(CommandHandler("admins", admins_cmd))
+    app.add_handler(CommandHandler("banned", banned_cmd))
     app.add_handler(CommandHandler("settings", settings_cmd))
 
     app.add_handler(CallbackQueryHandler(handle_callback))
