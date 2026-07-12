@@ -237,13 +237,15 @@ def build_banned_text() -> str:
     lines = "\n".join(f"• {get_ban_display(uid)}" for uid in banned)
     return f"🚫 *قائمة المحظورين* ({len(banned)}):\n\n{lines}"
 
-def build_banned_keyboard() -> InlineKeyboardMarkup:
+def build_banned_keyboard(from_settings: bool = False) -> InlineKeyboardMarkup:
     banned = get_banned_users()
     buttons = []
     for uid in banned:
         display = get_ban_display(uid).replace("`", "")
         buttons.append([InlineKeyboardButton(f"🔓 رفع الحظر عن {display}", callback_data=f"unban_{uid}")])
     buttons.append([InlineKeyboardButton("🔄 تحديث", callback_data="banned_panel")])
+    if from_settings:
+        buttons.append([InlineKeyboardButton("🔙 رجوع للإعدادات", callback_data="settings_main")])
     return InlineKeyboardMarkup(buttons)
 
 
@@ -337,6 +339,7 @@ def build_settings_keyboard() -> InlineKeyboardMarkup:
     keyboard = [
         [InlineKeyboardButton(f"{confirm_icon} تأكيد الإرسال (•)", callback_data="toggle_confirm")],
         [InlineKeyboardButton("👥 إدارة المشرفين", callback_data="admins_panel")],
+        [InlineKeyboardButton("🚫 قائمة المحظورين", callback_data="banned_panel")],
         [
             InlineKeyboardButton("✏️ رسالة الترحيب", callback_data="edit_welcome"),
             InlineKeyboardButton("✏️ رسالة الاستلام", callback_data="edit_request"),
@@ -383,6 +386,11 @@ async def send_settings_panel(msg) -> None:
 # ── Command handlers ──────────────────────────────────────────────────────────
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    sender = update.effective_user.id if update.effective_user else None
+    if sender and is_owner(sender) and update.effective_chat.type == "private":
+        await update.message.reply_text("👑 أهلاً بالمالك")
+        await send_settings_panel(update.message)
+        return
     await update.message.reply_text(get_welcome_message())
 
 async def commands_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -526,11 +534,12 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     if data == "banned_panel" or data.startswith("unban_"):
         if not await is_effective_admin(context, sender):
             return
+        from_settings = is_owner(sender)
         if data == "banned_panel":
             await query.edit_message_text(
                 build_banned_text(),
                 parse_mode="Markdown",
-                reply_markup=build_banned_keyboard(),
+                reply_markup=build_banned_keyboard(from_settings),
             )
         elif data.startswith("unban_"):
             try:
@@ -541,7 +550,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             await query.edit_message_text(
                 build_banned_text(),
                 parse_mode="Markdown",
-                reply_markup=build_banned_keyboard(),
+                reply_markup=build_banned_keyboard(from_settings),
             )
         return
 
