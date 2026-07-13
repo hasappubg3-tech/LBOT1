@@ -4,7 +4,15 @@ import logging
 import time
 import asyncio
 from pathlib import Path
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import (
+    Update,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    KeyboardButton,
+    KeyboardButtonRequestChat,
+    ReplyKeyboardMarkup,
+    ReplyKeyboardRemove,
+)
 from telegram.error import Forbidden
 from telegram.ext import (
     Application,
@@ -14,6 +22,8 @@ from telegram.ext import (
     filters,
     ContextTypes,
 )
+
+GROUP_PICK_REQUEST_ID = 9001
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -327,7 +337,7 @@ def build_settings_text() -> str:
     group_text = f"`{group_id}`" if group_id else "❌ غير مضبوطة"
     return (
         "⚙️ *إعدادات البوت*\n\n"
-        f"📦 المجموعة: {group_text}\n"
+        f"📦 كروب الاستلام: {group_text}\n"
         f"👥 المستخدمون: {user_count}\n"
         f"🛡 المشرفون: {admins_count}\n"
         f"👑 المالك: `{OWNER_CHAT_ID}`"
@@ -337,6 +347,7 @@ def build_settings_keyboard() -> InlineKeyboardMarkup:
     confirm_icon = "✅" if is_confirm_delivery_enabled() else "❌"
     cooldown_text = format_cooldown(get_notification_cooldown())
     keyboard = [
+        [InlineKeyboardButton("📦 كروب الاستلام", callback_data="edit_group")],
         [InlineKeyboardButton(f"{confirm_icon} تأكيد الإرسال (•)", callback_data="toggle_confirm")],
         [InlineKeyboardButton("👥 إدارة المشرفين", callback_data="admins_panel")],
         [InlineKeyboardButton("🚫 قائمة المحظورين", callback_data="banned_panel")],
@@ -347,6 +358,18 @@ def build_settings_keyboard() -> InlineKeyboardMarkup:
         [InlineKeyboardButton(f"⏱ وقت التنبيه: {cooldown_text}", callback_data="edit_cooldown")],
     ]
     return InlineKeyboardMarkup(keyboard)
+
+def build_group_pick_keyboard() -> ReplyKeyboardMarkup:
+    button = KeyboardButton(
+        text="📦 اختر كروب الاستلام",
+        request_chat=KeyboardButtonRequestChat(
+            request_id=GROUP_PICK_REQUEST_ID,
+            chat_is_channel=False,
+            chat_is_forum=True,
+            bot_is_member=True,
+        ),
+    )
+    return ReplyKeyboardMarkup([[button]], resize_keyboard=True, one_time_keyboard=True)
 
 def build_admins_text() -> str:
     admins = get_admins()
@@ -403,10 +426,33 @@ async def myid(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def cancel_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     sender = update.effective_user.id
-    if is_owner(sender) and sender in owner_state:
-        owner_state.pop(sender)
-        await update.message.reply_text("↩️ تم الإلغاء")
+    if is_owner(sender):
+        owner_state.pop(sender, None)
+        await update.message.reply_text("↩️ تم الإلغاء", reply_markup=ReplyKeyboardRemove())
         await send_settings_panel(update.message)
+
+
+async def handle_group_shared(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    msg = update.message
+    if not msg or not msg.chat_shared:
+        return
+    sender = update.effective_user.id if update.effective_user else None
+    if not sender or not is_owner(sender):
+        return
+    if msg.chat_shared.request_id != GROUP_PICK_REQUEST_ID:
+        return
+
+    group_id = msg.chat_shared.chat_id
+    settings["group_chat_id"] = group_id
+    save_settings(settings)
+    logger.info(f"Group set to {group_id} via chat picker by owner {sender}")
+
+    await msg.reply_text(
+        f"✅ تم ضبط كروب الاستلام: `{group_id}`",
+        parse_mode="Markdown",
+        reply_markup=ReplyKeyboardRemove(),
+    )
+    await send_settings_panel(msg)
 
 async def setgroup_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     sender = update.effective_user.id if update.effective_user else None
@@ -601,6 +647,20 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             build_admins_text(),
             parse_mode="Markdown",
             reply_markup=build_admins_keyboard(),
+        )
+
+    elif data == "edit_group":
+        current = get_group_id()
+        current_text = f"`{current}`" if current else "❌ غير مضبوطة"
+        await query.message.reply_text(
+            f"📦 *كروب الاستلام الحالي:* {current_text}\n\n"
+            "اضغط الزر بالأسفل واختر الكروب الذي تريد أن ينشئ فيه البوت "
+            "تبويباً خاصاً لكل مستخدم.\n\n"
+            "⚠️ يجب أن يكون الكروب مفعّل فيه *المواضيع (Topics/Forum)*، "
+            "وأن يكون البوت عضواً/مشرفاً فيه مسبقاً.\n\n"
+            "_(أرسل /cancel للإلغاء)_",
+            parse_mode="Markdown",
+            reply_markup=build_group_pick_keyboard(),
         )
 
     elif data == "edit_welcome":
@@ -1012,6 +1072,11 @@ def main() -> None:
     app.add_handler(CommandHandler("settings", settings_cmd))
 
     app.add_handler(CallbackQueryHandler(handle_callback))
+
+    app.add_handler(MessageHandler(
+        filters.StatusUpdate.CHAT_SHARED,
+        handle_group_shared,
+    ))
 
     app.add_handler(MessageHandler(
         filters.ChatType.PRIVATE & ARABIC_COMMANDS_FILTER,
